@@ -1,11 +1,12 @@
 # Opalite - Toolkit for single-cell and spatial transcriptomics analysis and visualization
 
-Opalite provides functions that implement specific workflows for single-cell and spatial transcriptomics analysis and visualization using existing packages such as [anndata][], [decoupler][], [scanpy][], [squidpy][], and [STalign][]
+Opalite provides functions that implement specific workflows for single-cell and spatial transcriptomics analysis and visualization using existing packages such as [anndata][], [decoupler][], [pydeseq2][], [scanpy][], [squidpy][], and [STalign][]
 
 [anndata]: https://anndata.readthedocs.io
 [decoupler]: https://decoupler.readthedocs.io
 [scanpy]: https://scanpy.readthedocs.io
 [squidpy]: https://squidpy.readthedocs.io
+[pydeseq2]: https://pydeseq2.readthedocs.io
 [STalign]: https://github.com/JEFworks-Lab/STalign
 
 <div align="center">
