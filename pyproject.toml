@@ -21,7 +21,7 @@ dependencies = [
 	"anndata==0.12.10",
 	"matplotlib==3.10.8",
 	"numpy==2.3.5",
-	"pandas==3.0.0",
+	"pandas==2.3.3",
 	"scanpy==1.12.1",
 	"scipy==1.17.0",
 	"spatialdata==0.7.2",
