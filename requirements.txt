@@ -1,0 +1,10 @@
+anndata==0.12.10
+matplotlib==3.10.8
+numpy==2.3.5
+pandas==3.0.0
+scanpy==1.12.1
+scipy==1.17.0
+spatialdata==0.7.2
+spatialdata-io==0.6.0
+spatialdata-plot==0.3.3
+squidpy==1.8.1
