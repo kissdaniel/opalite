@@ -131,3 +131,10 @@ def filter_cells(
     final_count = subset.obs.shape[0]
     print(f"{final_count} / {initial_count} barcodes passed filtering.")
     return subset
+
+
+def log_transform_and_scale(adata):
+    sc.pp.log1p(adata)
+    sc.pp.highly_variable_genes(adata)
+    sc.pp.regress_out(adata, ['total_counts', 'pct_counts_mt'])
+    sc.pp.scale(adata, max_value=10)
