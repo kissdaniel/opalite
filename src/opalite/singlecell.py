@@ -103,7 +103,7 @@ def generate_mt_plots(adata):
     plt.show()
 
 
-def apply_filters(
+def filter_cells(
         adata,
         min_umi_counts=None,
         max_umi_counts=None,
