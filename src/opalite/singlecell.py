@@ -1,7 +1,11 @@
+import anndata as ad
+import decoupler as dc
 import scanpy as sc
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from pydeseq2.dds import DeseqDataSet
+from pydeseq2.ds import DeseqStats
 
 
 def read_custom_mappings(excel_file, sheet_name):
@@ -152,24 +156,80 @@ def log_transform_and_scale(adata, inplace=False):
 
 def generate_umap(adata, label="sample", keys=None, n_pcs=30, categories=None, **kwargs):
     print("Generating UMAP...")
-    if isinstance(adata, list):
-        if not keys:
-            keys = [i for i in range(len(adata))]
-        adata = sc.concat(
-            adata,
-            label=label,
-            keys=keys,
-            index_unique="_"
-            )
+    # if isinstance(adata, list):
+    #     if not keys:
+    #         keys = [i for i in range(len(adata))]
+    #     adata = sc.concat(
+    #         adata,
+    #         label=label,
+    #         keys=keys,
+    #         index_unique="_"
+    #         )
     sc.tl.pca(adata, svd_solver='arpack')
     sc.pp.neighbors(adata, n_pcs=n_pcs)
     sc.tl.umap(adata)
     if categories:
-        fig = plt.figure()
-        for i, category in enumerate(categories):
-            ax = fig.add_subplot(1, 2, i+1)
-            sc.pl.umap(adata, color=category, title="", ax=ax, show=False, **kwargs)
+        sc.pl.umap(adata, color=categories, show=False, **kwargs)
     else:
-        sc.pl.umap(adata, title="", show=True)
+        sc.pl.umap(adata, show=True)
+    plt.tight_layout()
+    plt.show()
+
+
+def concatenate_anndata_objects(adata_list, label="sample", names=None):
+    if not names:
+        names = [i for i in range(len(adata_list))]
+    adata = sc.concat(
+        adata_list,
+        label=label,
+        keys=names,
+        index_unique="_"
+        )
+    return adata
+
+
+def generate_volcano_plot(
+        adata,
+        tested_name,
+        reference_name,
+        filter_celltype=None,
+        design="sample",
+        n_replicates=3,
+        min_cells=10,
+        min_counts=1000,
+        n_top_genes=10,
+        n_cpus=8):
+    if filter_celltype:
+        adata = adata[adata.obs["celltype"] == filter_celltype].copy()
+    else:
+        adata = adata.copy()
+    np.random.seed(0)
+    adata.obs['pseudo_rep'] = np.random.randint(0, n_replicates, size=adata.n_obs)
+    adata.obs['pseudo_sample'] = adata.obs['sample'].astype(str) + "_" + adata.obs['pseudo_rep'].astype(str)
+    pbdata = dc.pp.pseudobulk(adata, sample_col="pseudo_sample", groups_col=None)
+    dc.pp.filter_samples(pbdata, min_cells=min_cells, min_counts=min_counts)
+
+    dds = DeseqDataSet(
+        adata=pbdata,
+        design=design,
+        refit_cooks=True,
+        n_cpus=n_cpus
+    )
+    dds.deseq2()
+
+    stat_res = DeseqStats(dds, contrast=[design, tested_name, reference_name], quiet=True)
+    stat_res.summary()
+    results_df = stat_res.results_df
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    dc.pl.volcano(
+        results_df,
+        x='log2FoldChange',
+        y='padj',
+        top=n_top_genes,
+        ax=ax
+        )
+        # ax.set_xlim((-10, 10))
+    ax.set_title(f"{filter_celltype}", fontsize=16)
     plt.tight_layout()
     plt.show()
