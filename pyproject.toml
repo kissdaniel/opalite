@@ -23,7 +23,7 @@ dependencies = [
 	"numpy==2.3.5",
 	"pandas==2.3.3",
 	"scanpy==1.12.1",
-	"scipy==1.17.0",
+	"scipy==1.17.1",
 	"spatialdata==0.7.2",
 	"spatialdata-io==0.6.0",
 	"spatialdata-plot==0.3.3",
