@@ -19,7 +19,9 @@ def create_anndata_object(
         mappings_xlsx_file: str,
         sample_name: str,
         xlsx_sheet_name: str = "Cell types",
-        drop_na_types: bool = True
+        drop_na_types: bool = True,
+        calculate_qc_metrics: bool = True,
+        mt_gene_prefix: str = "mt-"
 ):
     extension = data_file.split('.')[-1]
     if extension == 'h5ad':
@@ -40,6 +42,9 @@ def create_anndata_object(
     adata.obs["sample"] = sample_name
     if drop_na_types:
         adata = adata[~adata.obs["celltype"].isna(), :].copy()
+    if calculate_qc_metrics:
+        adata.var["mt"] = adata.var_names.str.startswith(mt_gene_prefix)
+        sc.pp.calculate_qc_metrics(adata, qc_vars=['mt'], inplace=True)
     return adata
 
 
@@ -134,12 +139,15 @@ def filter_cells(
     return subset
 
 
-def log_transform_and_scale(adata):
+def log_transform_and_scale(adata, inplace=False):
     print("Log-transforming and scaling...")
+    if not inplace:
+        adata = adata.copy()
     sc.pp.log1p(adata)
     sc.pp.highly_variable_genes(adata)
     sc.pp.regress_out(adata, ['total_counts', 'pct_counts_mt'])
     sc.pp.scale(adata, max_value=10)
+    return adata
 
 
 def generate_umap(adata, label="sample", keys=None, n_pcs=30, categories=None, **kwargs):
@@ -161,9 +169,7 @@ def generate_umap(adata, label="sample", keys=None, n_pcs=30, categories=None, *
         for i, category in enumerate(categories):
             ax = fig.add_subplot(1, 2, i+1)
             sc.pl.umap(adata, color=category, title="", ax=ax, show=False, **kwargs)
-        plt.tight_layout()
-        plt.show()
     else:
         sc.pl.umap(adata, title="", show=True)
-        plt.tight_layout()
-        plt.show()
+    plt.tight_layout()
+    plt.show()
