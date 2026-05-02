@@ -113,6 +113,7 @@ def filter_cells(
         remove_doublets=False,
         doublet_threshold=None
 ):
+    print("Filtering cells...")
     subset = adata.copy()
     initial_count = subset.obs.shape[0]
     if min_umi_counts:
@@ -129,12 +130,40 @@ def filter_cells(
         sc.pp.scrublet(subset, threshold=doublet_threshold)
         subset = subset[~subset.obs['predicted_doublet'], :].copy()
     final_count = subset.obs.shape[0]
-    print(f"{final_count} / {initial_count} barcodes passed filtering.")
+    print(f"{final_count} / {initial_count} cells passed filtering.")
     return subset
 
 
 def log_transform_and_scale(adata):
+    print("Log-transforming and scaling...")
     sc.pp.log1p(adata)
     sc.pp.highly_variable_genes(adata)
     sc.pp.regress_out(adata, ['total_counts', 'pct_counts_mt'])
     sc.pp.scale(adata, max_value=10)
+
+
+def generate_umap(adata, label="sample", keys=None, n_pcs=30, categories=None, **kwargs):
+    print("Generating UMAP...")
+    if isinstance(adata, list):
+        if not keys:
+            keys = [i for i in range(len(adata))]
+        adata = sc.concat(
+            adata,
+            label=label,
+            keys=keys,
+            index_unique="_"
+            )
+    sc.tl.pca(adata, svd_solver='arpack')
+    sc.pp.neighbors(adata, n_pcs=n_pcs)
+    sc.tl.umap(adata)
+    if categories:
+        fig = plt.figure()
+        for i, category in enumerate(categories):
+            ax = fig.add_subplot(1, 2, i+1)
+            sc.pl.umap(adata, color=category, title="", ax=ax, show=False, **kwargs)
+        plt.tight_layout()
+        plt.show()
+    else:
+        sc.pl.umap(adata, title="", show=True)
+        plt.tight_layout()
+        plt.show()
