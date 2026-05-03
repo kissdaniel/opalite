@@ -17,6 +17,14 @@ def read_custom_mappings(excel_file, sheet_name):
     return mappings
 
 
+def export_attributes_to_csv(adata, attributes, filename):
+    df_to_save = adata.obs[attributes].copy()
+    df_to_save.reset_index(inplace=True)
+    df_to_save.rename(columns={df_to_save.columns[0]: 'cell_id'}, inplace=True)
+    df_to_save.to_csv(filename, index=False)
+    print(f"Export completed: {filename}")
+
+
 def create_anndata_object(
         data_file: str,
         mapmycells_csv_file: str,
