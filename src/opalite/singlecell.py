@@ -17,7 +17,11 @@ def read_custom_mappings(excel_file, sheet_name):
     return mappings
 
 
-def export_attributes_to_csv(adata, attributes, filename):
+def export_from_anndata_to_csv(
+        adata,
+        attributes: list[str],
+        filename: str
+):
     df_to_save = adata.obs[attributes].copy()
     df_to_save.reset_index(inplace=True)
     df_to_save.rename(columns={df_to_save.columns[0]: 'cell_id'}, inplace=True)
@@ -188,17 +192,19 @@ def concatenate_anndata_objects(adata_list, label="sample", names=None):
     return adata
 
 
-def generate_volcano_plot(
+def differential_expression(
         adata,
         tested_name,
         reference_name,
         filter_celltype=None,
         design="sample",
+        n_top_genes=10,
         n_replicates=3,
         min_cells=10,
         min_counts=1000,
-        n_top_genes=10,
-        n_cpus=8):
+        out_filename=None,
+        n_cpus=8
+):
     if filter_celltype:
         adata = adata[adata.obs["celltype"] == filter_celltype].copy()
     else:
@@ -219,17 +225,30 @@ def generate_volcano_plot(
 
     stat_res = DeseqStats(dds, contrast=[design, tested_name, reference_name], quiet=True)
     stat_res.summary()
-    results_df = stat_res.results_df
+    if out_filename:
+        stat_res.results_df.to_csv(out_filename)
+    return stat_res.results_df
 
-    fig, ax = plt.subplots(figsize=(8, 8))
-    dc.pl.volcano(
-        results_df,
-        x='log2FoldChange',
-        y='padj',
-        top=n_top_genes,
-        ax=ax
-        )
-        # ax.set_xlim((-10, 10))
-    ax.set_title(f"{filter_celltype}", fontsize=16)
-    plt.tight_layout()
-    plt.show()
+
+def enrichment_analysis(
+        de_data,
+        omnipath_organism:str = "mouse",
+        method:str = "ulm",
+        p_threshold: float = None,
+        out_filename: str = None
+):
+    de_data.dropna(inplace=True)
+    data = de_data[["stat"]].T.rename(index={"stat": f"treatment.vs.control"})
+    hallmark = dc.op.hallmark(organism=omnipath_organism)
+    hm_acts, hm_padj = dc.mt.ulm(data=data, net=hallmark)
+    if p_threshold:
+        msk = (hm_padj.T < p_threshold).iloc[:, 0]
+        hm_acts = hm_acts.loc[:, msk]
+    if out_filename:
+        df1 = hm_acts.T.copy()
+        df2 = hm_padj.T.copy()
+        df1.columns = ['score']
+        df2.columns = ['padj']
+        df_combined = pd.concat([df1, df2], axis=1)
+        df_combined.to_csv(out_filename)
+    return hm_acts
