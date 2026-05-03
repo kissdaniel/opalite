@@ -244,6 +244,7 @@ def enrichment_analysis(
     if p_threshold:
         msk = (hm_padj.T < p_threshold).iloc[:, 0]
         hm_acts = hm_acts.loc[:, msk]
+        hm_padj = hm_padj.loc[:, msk]
     if out_filename:
         df1 = hm_acts.T.copy()
         df2 = hm_padj.T.copy()
