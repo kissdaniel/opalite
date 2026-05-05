@@ -64,33 +64,63 @@ def create_anndata_object(
     return adata
 
 
-def generate_qc_plots(adata):
-    fig = plt.figure(figsize=(6 * 3, 5 * 1))
-    ax = fig.add_subplot(1, 3, 1)
-    x = adata.obs["total_counts"]
-    y = np.random.uniform(0, 1, size=len(x))
-    ax.scatter(x, y, alpha=0.1)
-    ax_t = ax.twinx()
-    ax_t.hist(adata.obs["total_counts"], bins=100, density=True, histtype="step", color="black")
-    ax_t.set_yticks([])
-    ax.set_xscale("log", base=2)
-    ax.set_xlabel("UMIs per barcode (log)", fontsize=14)
-    ax = fig.add_subplot(1, 3, 2)
-    x = adata.obs["n_genes_by_counts"]
-    y = np.random.uniform(0, 1, size=len(x))
-    ax.scatter(x, y, alpha=0.1)
-    ax_t = ax.twinx()
-    ax_t.hist(adata.obs["n_genes_by_counts"], bins=100, density=True, histtype="step", color="black")
-    ax_t.set_yticks([])
-    ax.set_xlabel("Genes per barcode (linear)", fontsize=14)
-    ax = fig.add_subplot(1, 3, 3)
+def generate_qc_plots(
+        adata,
+        min_umi_counts=None,
+        max_umi_counts=None,
+        min_genes=None,
+        max_genes=None,
+        max_mt_percent=None
+):
+    fig = plt.figure(figsize=(10, 8))
+
+    ax1 = fig.add_subplot(2, 2, 1)
+    y = adata.obs["total_counts"]
+    x = np.random.uniform(0.9, 1.1, size=len(y))
+    s = 50/len(y)
+    ax1.violinplot(y, showextrema=False)
+    ax1.scatter(x, y, s=s, c="black", alpha=0.8)
+    if min_umi_counts:
+        ax1.axhline(min_umi_counts, color="red", linestyle="--")
+    if max_umi_counts:
+        ax1.axhline(max_umi_counts, color="red", linestyle="--")
+    ax1.set_ylabel("UMIs per barcode (log)")
+    ax1.set_yscale("log", base=2)
+    ax1.set_xticks([])
+
+    ax2 = fig.add_subplot(2, 2, 2)
+    y = adata.obs["n_genes_by_counts"]
+    x = np.random.uniform(0.9, 1.1, size=len(y))
+    s = 50/len(y)
+    ax2.violinplot(y, showextrema=False)
+    ax2.scatter(x, y, s=s, c="black", alpha=0.8)
+    if min_genes:
+        ax2.axhline(min_genes, color="red", linestyle="--")
+    if max_genes:
+        ax2.axhline(max_genes, color="red", linestyle="--")
+    ax2.set_ylabel("Genes per barcode (linear)")
+    ax2.set_xticks([])
+
+    ax3 = fig.add_subplot(2, 2, 3)
+    y = adata.obs["pct_counts_mt"]
+    x = np.random.uniform(0.9, 1.1, size=len(y))
+    s = 50/len(y)
+    ax3.violinplot(y, showextrema=False)
+    ax3.scatter(x, y, s=s, c="black", alpha=0.8)
+    if max_mt_percent:
+        ax3.axhline(max_mt_percent, color="red", linestyle="--")
+    ax3.set_ylabel("% Mitochondrial UMIs per barcode (linear)")
+    ax3.set_xticks([])
+
+    ax4 = fig.add_subplot(2, 2, 4)
     x = adata.obs["log1p_total_counts"]
     y = adata.obs["log1p_n_genes_by_counts"]
-    ax.scatter(x, y, s=5, alpha=0.25)
-    ax.set_ylabel("Log of num. genes per cell", fontsize=14)
-    ax.set_xlabel("Log library size", fontsize=14)
+    ax4.scatter(x, y, s=5, alpha=0.25)
+    ax4.set_ylabel("Log of num. genes per cell")
+    ax4.set_xlabel("Log library size")
     corr_coef = np.corrcoef(x, y)[0, 1]
-    ax.set_title("Correlation = " + str(round(corr_coef, 3)), fontsize=14)
+    ax4.text(x=0.2, y=0.8, s="Correlation = " + str(round(corr_coef, 3)), fontsize=12, transform=ax4.transAxes)
+
     plt.tight_layout()
     plt.show()
 
