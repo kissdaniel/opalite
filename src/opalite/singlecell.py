@@ -85,7 +85,7 @@ def generate_qc_plots(
     if max_umi_counts:
         ax1.axhline(max_umi_counts, color="red", linestyle="--")
     ax1.set_ylabel("UMIs per barcode (log)")
-    ax1.set_yscale("log", base=2)
+    ax1.set_yscale("log", base=10)
     ax1.set_xticks([])
 
     ax2 = fig.add_subplot(2, 2, 2)
@@ -119,7 +119,7 @@ def generate_qc_plots(
     ax4.set_ylabel("Log of num. genes per cell")
     ax4.set_xlabel("Log library size")
     corr_coef = np.corrcoef(x, y)[0, 1]
-    ax4.text(x=0.2, y=0.8, s="Correlation = " + str(round(corr_coef, 3)), fontsize=12, transform=ax4.transAxes)
+    ax4.text(x=0.1, y=0.9, s="Correlation = " + str(round(corr_coef, 3)), fontsize=12, transform=ax4.transAxes)
 
     plt.tight_layout()
     plt.show()
