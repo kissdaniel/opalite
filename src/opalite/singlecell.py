@@ -35,6 +35,7 @@ def create_anndata_object(
         mappings_xlsx_file: str,
         sample_name: str,
         xlsx_sheet_name: str = "Cell types",
+        mapmycells_bootstrap_confidence_threshold: float = 0.8,
         drop_na_types: bool = True,
         calculate_qc_metrics: bool = True,
         mt_gene_prefix: str = "mt-"
@@ -47,6 +48,8 @@ def create_anndata_object(
     else:
         raise ValueError(f"Unsupported file extension: {extension}")
     results = pd.read_csv(mapmycells_csv_file, comment="#")
+    results.loc[results["subclass_bootstrapping_probability"] < mapmycells_bootstrap_confidence_threshold, "subclass_name"] = np.nan
+    results.loc[results["class_bootstrapping_probability"] < mapmycells_bootstrap_confidence_threshold, "subclass_name"] = np.nan
     celltype_mapping = read_custom_mappings(mappings_xlsx_file, xlsx_sheet_name)
     inverted_mapping = {
         subclass: celltype
@@ -59,7 +62,8 @@ def create_anndata_object(
     if drop_na_types:
         adata = adata[~adata.obs["celltype"].isna(), :].copy()
     if calculate_qc_metrics:
-        adata.var["mt"] = adata.var_names.str.startswith(mt_gene_prefix)
+        # adata.var["mt"] = adata.var_names.str.startswith(mt_gene_prefix)
+        adata.var["mt"] = adata.var["gene_symbols"].str.startswith(mt_gene_prefix)
         sc.pp.calculate_qc_metrics(adata, qc_vars=['mt'], inplace=True)
     return adata
 
@@ -217,7 +221,8 @@ def concatenate_anndata_objects(adata_list, label="sample", names=None):
         adata_list,
         label=label,
         keys=names,
-        index_unique="_"
+        index_unique="_",
+        merge="unique"
         )
     return adata
 
@@ -228,6 +233,7 @@ def differential_expression(
         reference_name,
         filter_celltype=None,
         design="sample",
+        gene_names="gene_symbols",
         n_top_genes=10,
         n_replicates=3,
         min_cells=10,
@@ -239,6 +245,7 @@ def differential_expression(
         adata = adata[adata.obs["celltype"] == filter_celltype].copy()
     else:
         adata = adata.copy()
+    adata.var_names = adata.var[gene_names].astype(str).values
     np.random.seed(0)
     adata.obs['pseudo_rep'] = np.random.randint(0, n_replicates, size=adata.n_obs)
     adata.obs['pseudo_sample'] = adata.obs['sample'].astype(str) + "_" + adata.obs['pseudo_rep'].astype(str)
@@ -262,8 +269,8 @@ def differential_expression(
 
 def enrichment_analysis(
         de_data,
-        omnipath_organism:str = "mouse",
-        method:str = "ulm",
+        omnipath_organism: str = "mouse",
+        method: str = "ulm",
         p_threshold: float = None,
         out_filename: str = None
 ):
