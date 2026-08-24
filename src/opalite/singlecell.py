@@ -276,24 +276,34 @@ def differential_expression(
 
 def enrichment_analysis(
         de_data,
+        tested_name: str = None,
+        reference_name: str = None,
         omnipath_organism: str = "mouse",
         method: str = "ulm",
         p_threshold: float = None,
         out_filename: str = None
 ):
     de_data.dropna(inplace=True)
-    data = de_data[["stat"]].T.rename(index={"stat": f"treatment.vs.control"})
+    sample_name = "treatment.vs.control"
+    if tested_name and reference_name:
+        sample_name = f"{tested_name}.vs.{reference_name}"
+    data = de_data[["stat"]].T.rename(index={"stat": sample_name})
     hallmark = dc.op.hallmark(organism=omnipath_organism)
-    hm_acts, hm_padj = dc.mt.ulm(data=data, net=hallmark)
+    if method == "ulm":
+        hm_acts, hm_padj = dc.mt.ulm(data=data, net=hallmark)
+    if method == "gsea":
+        hm_acts, hm_padj = dc.mt.gsea(data=data, net=hallmark)
+    if method == "ora":
+        hm_acts, hm_padj = dc.mt.ora(data=data, net=hallmark)
     if p_threshold:
         msk = (hm_padj.T < p_threshold).iloc[:, 0]
         hm_acts = hm_acts.loc[:, msk]
         hm_padj = hm_padj.loc[:, msk]
+    df1 = hm_acts.T.copy()
+    df2 = hm_padj.T.copy()
+    df1.columns = ['score']
+    df2.columns = ['padj']
+    df_combined = pd.concat([df1, df2], axis=1)
     if out_filename:
-        df1 = hm_acts.T.copy()
-        df2 = hm_padj.T.copy()
-        df1.columns = ['score']
-        df2.columns = ['padj']
-        df_combined = pd.concat([df1, df2], axis=1)
         df_combined.to_csv(out_filename)
-    return hm_acts
+    return df_combined
