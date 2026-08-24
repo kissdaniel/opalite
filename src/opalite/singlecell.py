@@ -245,10 +245,16 @@ def differential_expression(
         adata = adata[adata.obs["celltype"] == filter_celltype].copy()
     else:
         adata = adata.copy()
+    n_reference = (adata.obs[design] == reference_name).sum()
+    n_tested = (adata.obs[design] == tested_name).sum()
+    if filter_celltype:
+        print(f"Sample size for {filter_celltype}: #{reference_name} = {n_reference}, #{tested_name} = {n_tested}")
+    else:
+        print(f"Sample size: #{reference_name} = {n_reference}, #{tested_name} = {n_tested}")
     adata.var_names = adata.var[gene_names].astype(str).values
     np.random.seed(0)
     adata.obs['pseudo_rep'] = np.random.randint(0, n_replicates, size=adata.n_obs)
-    adata.obs['pseudo_sample'] = adata.obs['sample'].astype(str) + "_" + adata.obs['pseudo_rep'].astype(str)
+    adata.obs['pseudo_sample'] = adata.obs[design].astype(str) + "_" + adata.obs['pseudo_rep'].astype(str)
     pbdata = dc.pp.pseudobulk(adata, sample_col="pseudo_sample", groups_col=None)
     dc.pp.filter_samples(pbdata, min_cells=min_cells, min_counts=min_counts)
 
@@ -256,7 +262,8 @@ def differential_expression(
         adata=pbdata,
         design=design,
         refit_cooks=True,
-        n_cpus=n_cpus
+        n_cpus=n_cpus,
+        quiet=True
     )
     dds.deseq2()
 
