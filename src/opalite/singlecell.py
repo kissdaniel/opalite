@@ -1,32 +1,10 @@
-import anndata as ad
 import decoupler as dc
 import scanpy as sc
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
+import scipy.sparse as sp
 from pydeseq2.dds import DeseqDataSet
 from pydeseq2.ds import DeseqStats
-
-
-def read_custom_mappings(excel_file, sheet_name):
-    xls_data = pd.read_excel(excel_file, sheet_name=sheet_name)
-    mappings = {
-        col: xls_data[col].dropna().tolist()
-        for col in xls_data.columns
-    }
-    return mappings
-
-
-def export_from_anndata_to_csv(
-        adata,
-        attributes: list[str],
-        filename: str
-):
-    df_to_save = adata.obs[attributes].copy()
-    df_to_save.reset_index(inplace=True)
-    df_to_save.rename(columns={df_to_save.columns[0]: 'cell_id'}, inplace=True)
-    df_to_save.to_csv(filename, index=False)
-    print(f"Export completed: {filename}")
 
 
 def create_anndata_object(
@@ -35,11 +13,54 @@ def create_anndata_object(
         mappings_xlsx_file: str,
         sample_name: str,
         xlsx_sheet_name: str = "Cell types",
-        mapmycells_bootstrap_confidence_threshold: float = 0.8,
+        mapmycells_bstrap_conf_thresholds: dict = None,
         drop_na_types: bool = True,
         calculate_qc_metrics: bool = True,
         mt_gene_prefix: str = "mt-"
 ):
+    """
+    Creates an AnnData object from a data file, integrating MapMyCells cell type annotations.
+
+    This function reads a single-cell data file (.h5ad or .h5), applies cell type annotations
+    from a MapMyCells CSV output, and filters the annotations based on bootstrapping
+    probability thresholds. It also supports calculating basic QC metrics.
+
+    Parameters
+    ----------
+    data_file : str
+        Path to the single-cell data file (.h5ad or 10x .h5 format).
+    mapmycells_csv_file : str
+        Path to the MapMyCells CSV output containing taxonomy assignments.
+    mappings_xlsx_file : str
+        Path to the Excel file containing custom cell type mapping definitions.
+    sample_name : str
+        Identifier for the sample, added to `adata.obs['sample']`.
+    xlsx_sheet_name : str, default "Cell types"
+        The sheet name in `mappings_xlsx_file` to read the mappings from.
+    mapmycells_bstrap_conf_thresholds : dict, optional
+        Custom bootstrapping probability thresholds for taxonomy levels
+        (e.g., {"class_bootstrapping_probability": 0.85}). Defaults to 0.8.
+    drop_na_types : bool, default True
+        If True, filters out cells that do not have an assigned cell type.
+    calculate_qc_metrics : bool, default True
+        If True, calculates standard scanpy QC metrics (e.g., mitochondrial gene content).
+    mt_gene_prefix : str, default "mt-"
+        The prefix used to identify mitochondrial genes in `adata.var['gene_symbols']`.
+
+    Returns
+    -------
+    anndata.AnnData
+        The annotated AnnData object with computed QC metrics and cell type assignments.
+
+    Examples
+    --------
+    >>> adata = create_anndata_object(
+    ...     data_file="sample1.h5ad",
+    ...     mapmycells_csv_file="sample1_MMC.csv",
+    ...     mappings_xlsx_file="celltype_mappings.xlsx",
+    ...     sample_name="sample_1"
+    ... )
+    """
     extension = data_file.split('.')[-1]
     if extension == 'h5ad':
         adata = sc.read_h5ad(data_file)
@@ -48,114 +69,49 @@ def create_anndata_object(
     else:
         raise ValueError(f"Unsupported file extension: {extension}")
     results = pd.read_csv(mapmycells_csv_file, comment="#")
-    results.loc[results["subclass_bootstrapping_probability"] < mapmycells_bootstrap_confidence_threshold, "subclass_name"] = np.nan
-    results.loc[results["class_bootstrapping_probability"] < mapmycells_bootstrap_confidence_threshold, "subclass_name"] = np.nan
-    celltype_mapping = read_custom_mappings(mappings_xlsx_file, xlsx_sheet_name)
+
+    bstrap_thresholds = {
+            "class_bootstrapping_probability": 0.8,
+            "subclass_bootstrapping_probability": 0.8,
+            "supertype_bootstrapping_probability": 0.8,
+            "cluster_bootstrapping_probability": 0.8
+            }
+    if mapmycells_bstrap_conf_thresholds:
+        for key in mapmycells_bstrap_conf_thresholds:
+            bstrap_thresholds[key] = mapmycells_bstrap_conf_thresholds[key]
+
+    results.loc[results["class_bootstrapping_probability"] < bstrap_thresholds["class_bootstrapping_probability"], ["class_name", "subclass_name", "supertype_name", "cluster_name"]] = np.nan
+    results.loc[results["subclass_bootstrapping_probability"] < bstrap_thresholds["subclass_bootstrapping_probability"], ["subclass_name", "supertype_name", "cluster_name"]] = np.nan
+    results.loc[results["supertype_bootstrapping_probability"] < bstrap_thresholds["supertype_bootstrapping_probability"], ["supertype_name", "cluster_name"]] = np.nan
+    results.loc[results["cluster_bootstrapping_probability"] < bstrap_thresholds["cluster_bootstrapping_probability"], "cluster_name"] = np.nan
+
+    celltype_mapping = _read_custom_mappings(mappings_xlsx_file, xlsx_sheet_name)
     inverted_mapping = {
         subclass: celltype
         for celltype, subclasses in celltype_mapping.items()
         for subclass in subclasses
     }
-    adata.obs["subclass_name"] = results["subclass_name"].values
-    adata.obs["celltype"] = adata.obs["subclass_name"].map(inverted_mapping)
+
+    def get_celltype(row):
+        if row["class_name"] in inverted_mapping:
+            return inverted_mapping[row["class_name"]]
+        if row["subclass_name"] in inverted_mapping:
+            return inverted_mapping[row["subclass_name"]]
+        if row["supertype_name"] in inverted_mapping:
+            return inverted_mapping[row["supertype_name"]]
+        if row["cluster_name"] in inverted_mapping:
+            return inverted_mapping[row["cluster_name"]]
+        return None
+
+    results["celltype"] = results.apply(get_celltype, axis=1)
+    adata.obs["celltype"] = adata.obs.index.map(results.set_index("cell_id")["celltype"])
     adata.obs["sample"] = sample_name
     if drop_na_types:
         adata = adata[~adata.obs["celltype"].isna(), :].copy()
     if calculate_qc_metrics:
-        # adata.var["mt"] = adata.var_names.str.startswith(mt_gene_prefix)
         adata.var["mt"] = adata.var["gene_symbols"].str.startswith(mt_gene_prefix)
         sc.pp.calculate_qc_metrics(adata, qc_vars=['mt'], inplace=True)
     return adata
-
-
-def generate_qc_plots(
-        adata,
-        min_umi_counts=None,
-        max_umi_counts=None,
-        min_genes=None,
-        max_genes=None,
-        max_mt_percent=None
-):
-    fig = plt.figure(figsize=(10, 8))
-
-    ax1 = fig.add_subplot(2, 2, 1)
-    y = adata.obs["total_counts"]
-    x = np.random.uniform(0.9, 1.1, size=len(y))
-    s = 50/len(y)
-    ax1.violinplot(y, showextrema=False)
-    ax1.scatter(x, y, s=s, c="black", alpha=0.8)
-    if min_umi_counts:
-        ax1.axhline(min_umi_counts, color="red", linestyle="--")
-    if max_umi_counts:
-        ax1.axhline(max_umi_counts, color="red", linestyle="--")
-    ax1.set_ylabel("UMIs per barcode (log)")
-    ax1.set_yscale("log", base=10)
-    ax1.set_xticks([])
-
-    ax2 = fig.add_subplot(2, 2, 2)
-    y = adata.obs["n_genes_by_counts"]
-    x = np.random.uniform(0.9, 1.1, size=len(y))
-    s = 50/len(y)
-    ax2.violinplot(y, showextrema=False)
-    ax2.scatter(x, y, s=s, c="black", alpha=0.8)
-    if min_genes:
-        ax2.axhline(min_genes, color="red", linestyle="--")
-    if max_genes:
-        ax2.axhline(max_genes, color="red", linestyle="--")
-    ax2.set_ylabel("Genes per barcode (linear)")
-    ax2.set_xticks([])
-
-    ax3 = fig.add_subplot(2, 2, 3)
-    y = adata.obs["pct_counts_mt"]
-    x = np.random.uniform(0.9, 1.1, size=len(y))
-    s = 50/len(y)
-    ax3.violinplot(y, showextrema=False)
-    ax3.scatter(x, y, s=s, c="black", alpha=0.8)
-    if max_mt_percent:
-        ax3.axhline(max_mt_percent, color="red", linestyle="--")
-    ax3.set_ylabel("% Mitochondrial UMIs per barcode (linear)")
-    ax3.set_xticks([])
-
-    ax4 = fig.add_subplot(2, 2, 4)
-    x = adata.obs["log1p_total_counts"]
-    y = adata.obs["log1p_n_genes_by_counts"]
-    ax4.scatter(x, y, s=5, alpha=0.25)
-    ax4.set_ylabel("Log of num. genes per cell")
-    ax4.set_xlabel("Log library size")
-    corr_coef = np.corrcoef(x, y)[0, 1]
-    ax4.text(x=0.1, y=0.9, s="Correlation = " + str(round(corr_coef, 3)), fontsize=12, transform=ax4.transAxes)
-
-    plt.tight_layout()
-    plt.show()
-
-
-def generate_barcode_rank_plot(adata):
-    counts = adata.obs['total_counts'].sort_values(ascending=False).values
-    ranks = np.arange(len(counts))
-    plt.figure(figsize=(6, 5))
-    plt.loglog(ranks, counts, label='BC Rank Plot', color='navy')
-    plt.xlabel('Barcodes')
-    plt.ylabel('Total UMI Count')
-    plt.grid(True, which="both", ls="-", alpha=0.25)
-    plt.show()
-
-
-def generate_mt_plots(adata):
-    fig = plt.figure(figsize=(6 * 3, 5 * 1))
-    ax = fig.add_subplot(1, 3, 1)
-    ax.hist(adata.obs["pct_counts_mt"], 100)
-    ax.set_xlabel("% MT-content", fontsize=14)
-    ax.set_ylabel("Frequency", fontsize=14)
-    ax = fig.add_subplot(1, 3, 2)
-    ax.scatter(adata.obs["log1p_total_counts"], adata.obs["mt_pct_content"], alpha=0.25)
-    ax.set_xlabel("Log library size", fontsize=14)
-    ax.set_ylabel("% MT-content", fontsize=14)
-    ax = fig.add_subplot(1, 3, 3)
-    ax.scatter(adata.obs["log1p_n_genes_by_counts"], adata.obs["mt_pct_content"], alpha=0.25)
-    ax.set_xlabel("Log num. genes per cell", fontsize=14)
-    ax.set_ylabel("% MT-content", fontsize=14)
-    plt.tight_layout()
-    plt.show()
 
 
 def filter_cells(
@@ -201,100 +157,179 @@ def log_transform_and_scale(adata, inplace=False):
     return adata_hvf
 
 
-def generate_umap(adata, label="sample", keys=None, n_pcs=30, categories=None, **kwargs):
-    print("Generating UMAP...")
-    sc.tl.pca(adata, svd_solver='arpack')
-    sc.pp.neighbors(adata, n_pcs=n_pcs)
-    sc.tl.umap(adata)
-    if categories:
-        sc.pl.umap(adata, color=categories, show=False, **kwargs)
-    else:
-        sc.pl.umap(adata, show=True)
-    plt.tight_layout()
-    plt.show()
-
-
-def concatenate_anndata_objects(adata_list, label="sample", names=None):
-    if not names:
-        names = [i for i in range(len(adata_list))]
-    adata = sc.concat(
-        adata_list,
-        label=label,
-        keys=names,
-        index_unique="_",
-        merge="unique"
-        )
-    return adata
-
-
-def differential_expression(
+def calculate_pseudobulk_deg(
         adata,
-        tested_name,
-        reference_name,
+        control_name: str,
+        treatment_names: list,
         filter_celltype=None,
-        design="sample",
+        design_factors="condition",
         gene_names="gene_symbols",
-        n_top_genes=10,
-        n_replicates=3,
         min_cells=10,
         min_counts=1000,
-        out_filename=None,
-        n_cpus=8
-):
+        write_output_file=True,
+        n_cpus=None
+) -> dict:
+    """
+    Performs pseudobulk differential expression analysis using PyDESeq2.
+
+    Filters for the specified cell type (optional), aggregates single-cell data
+    into pseudobulk samples per sample, and runs DESeq2 comparing treatment conditions
+    against a control group.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        The input single-cell AnnData object.
+    control_name : str
+        The reference/control condition name for comparison.
+    treatment_names : list of str
+        List of treatment condition names to compare against the control.
+    filter_celltype : str, optional
+        Specific cell type in `adata.obs['celltype']` to filter for before analysis.
+    design_factors : str, default "condition"
+        Column name in `adata.obs` representing the experimental condition/factor.
+    gene_names : str, default "gene_symbols"
+        Column name in `adata.var` containing gene names to set as variable names.
+    min_cells : int, default 10
+        Minimum number of cells required per pseudobulk sample.
+    min_counts : int, default 1000
+        Minimum total counts required per pseudobulk sample.
+    write_output_file : bool, default True
+        If True, saves differential expression results as CSV files.
+    n_cpus : int, optional
+        Number of CPU threads to use for PyDESeq2 computations.
+
+    Returns
+    -------
+    dict of {str: pandas.DataFrame}
+        A dictionary mapping each treatment name to its corresponding DESeq2 results DataFrame.
+
+    Examples
+    --------
+    >>> de_results = calculate_pseudobulk_deg(
+    ...     adata=adata,
+    ...     control_name="Control",
+    ...     treatment_names=["LPS", "PolyIC"],
+    ...     filter_celltype="Microglia",
+    ...     design_factors="condition"
+    ... )
+    """
     if filter_celltype:
         adata = adata[adata.obs["celltype"] == filter_celltype].copy()
     else:
         adata = adata.copy()
-    n_reference = (adata.obs[design] == reference_name).sum()
-    n_tested = (adata.obs[design] == tested_name).sum()
-    if filter_celltype:
-        print(f"Sample size for {filter_celltype}: #{reference_name} = {n_reference}, #{tested_name} = {n_tested}")
-    else:
-        print(f"Sample size: #{reference_name} = {n_reference}, #{tested_name} = {n_tested}")
-    adata.var_names = adata.var[gene_names].astype(str).values
-    np.random.seed(0)
-    adata.obs['pseudo_rep'] = np.random.randint(0, n_replicates, size=adata.n_obs)
-    adata.obs['pseudo_sample'] = adata.obs[design].astype(str) + "_" + adata.obs['pseudo_rep'].astype(str)
-    pbdata = dc.pp.pseudobulk(adata, sample_col="pseudo_sample", groups_col=None)
+
+    adata.var_names = adata.var[gene_names].astype(str)
+    adata.var_names_make_unique()
+
+    pbdata = dc.pp.pseudobulk(adata, sample_col="sample", groups_col=None, mode="sum")
     dc.pp.filter_samples(pbdata, min_cells=min_cells, min_counts=min_counts)
+
+    if sp.issparse(pbdata.X):
+        pbdata.X = pbdata.X.toarray()
+    pbdata.X = pbdata.X.astype(np.float64)
 
     dds = DeseqDataSet(
         adata=pbdata,
-        design=design,
+        design_factors=design_factors,
         refit_cooks=True,
         n_cpus=n_cpus,
         quiet=True
     )
     dds.deseq2()
 
-    stat_res = DeseqStats(dds, contrast=[design, tested_name, reference_name], quiet=True)
-    stat_res.summary()
-    if out_filename:
-        stat_res.results_df.to_csv(out_filename)
-    return stat_res.results_df
+    stats_dict = {}
+
+    for tn in treatment_names:
+        res = DeseqStats(dds, contrast=[design_factors, tn, control_name])
+        res.summary()
+        stats_dict[tn] = res.results_df
+        if write_output_file:
+            res.results_df.to_csv(f"{filter_celltype}_{tn}_all_DEG.csv")
+
+    return stats_dict
 
 
-def enrichment_analysis(
+def calculate_geneset_activities(
         de_data,
-        tested_name: str = None,
-        reference_name: str = None,
+        gene_set_name: str,
+        control_name: str = None,
+        treatment_name: str = None,
         omnipath_organism: str = "mouse",
         method: str = "ulm",
         p_threshold: float = None,
         out_filename: str = None
 ):
+    """
+    Performs gene set enrichment analysis using the decoupler package and OmniPath networks.
+
+    Calculates pathway or transcription factor activities from differential expression
+    statistics using methods like ULM, GSEA, or ORA. The results are optionally filtered
+    by a p-value threshold and can be saved to a CSV file.
+
+    Parameters
+    ----------
+    de_data : pandas.DataFrame
+        Differential expression results containing a 'stat' column (e.g., from DESeq2).
+    gene_set_name : str
+        The name of the OmniPath network to use ('collectri', 'hallmark', or 'progeny').
+    control_name : str, optional
+        Name of the control condition, used for naming the contrast.
+    treatment_name : str, optional
+        Name of the treatment condition, used for naming the contrast.
+    omnipath_organism : str, default "mouse"
+        Organism name for the OmniPath query (e.g., "mouse", "human").
+    method : str, default "ulm"
+        The decoupler method to use for enrichment ("ulm", "gsea", or "ora").
+    p_threshold : float, optional
+        If provided, filters out pathways/TFs with an adjusted p-value above this threshold.
+    out_filename : str, optional
+        If provided, saves the combined enrichment scores and p-values to this CSV file.
+
+    Returns
+    -------
+    pandas.DataFrame
+        A dataframe containing the enrichment 'score' and 'padj' (adjusted p-value)
+        for each pathway or transcription factor.
+
+    Examples
+    --------
+    >>> enrichment_df = calculate_geneset_activities(
+    ...     de_data=deseq_results,
+    ...     gene_set_name="hallmark",
+    ...     treatment_name="LPS",
+    ...     control_name="Control",
+    ...     method="ulm",
+    ...     out_filename="LPS_vs_Control_hallmark.csv"
+    ... )
+    """
     de_data.dropna(inplace=True)
     sample_name = "treatment.vs.control"
-    if tested_name and reference_name:
-        sample_name = f"{tested_name}.vs.{reference_name}"
+    if treatment_name and control_name:
+        sample_name = f"{treatment_name}.vs.{control_name}"
     data = de_data[["stat"]].T.rename(index={"stat": sample_name})
-    hallmark = dc.op.hallmark(organism=omnipath_organism)
-    if method == "ulm":
-        hm_acts, hm_padj = dc.mt.ulm(data=data, net=hallmark)
+
+    if gene_set_name == "collectri":
+        net = dc.op.collectri(organism=omnipath_organism)
+    if gene_set_name == "hallmark":
+        net = dc.op.hallmark(organism=omnipath_organism)
+    if gene_set_name == "progeny":
+        net = dc.op.progeny(organism=omnipath_organism)
+    # if gene_set_name == "kegg":
+    #     kegg_df = dc.op.resource(name="KEGG")
+    #     kegg_mouse = kegg_df[kegg_df["ncbi_tax_id"] == 10090].copy()
+    #     net = kegg_mouse.rename(columns={"geneset": "source", "genesymbol": "target"})
+    #     net = net.dropna(subset=["source", "target"])
+    #     net["source"] = net["source"].astype(str)
+    #     net["target"] = net["target"].astype(str)
+    #     net = net.drop_duplicates(subset=["source", "target"])
+
     if method == "gsea":
-        hm_acts, hm_padj = dc.mt.gsea(data=data, net=hallmark)
+        hm_acts, hm_padj = dc.mt.gsea(data=data, net=net)
     if method == "ora":
-        hm_acts, hm_padj = dc.mt.ora(data=data, net=hallmark)
+        hm_acts, hm_padj = dc.mt.ora(data=data, net=net)
+    if method == "ulm":
+        hm_acts, hm_padj = dc.mt.ulm(data=data, net=net)
     if p_threshold:
         msk = (hm_padj.T < p_threshold).iloc[:, 0]
         hm_acts = hm_acts.loc[:, msk]
@@ -307,3 +342,101 @@ def enrichment_analysis(
     if out_filename:
         df_combined.to_csv(out_filename)
     return df_combined
+
+
+def significant_genes_to_csv(
+        de_data,
+        filename_prefix: str,
+        lfc_threshold: float = 0.5,
+        p_threshold: float = 0.05,
+        top=None
+):
+    """
+    Filters differential expression results and saves the significant genes to a CSV file.
+
+    Filters genes based on a log2-fold change threshold and an adjusted p-value threshold.
+    The resulting significant genes are sorted by their absolute test statistic and
+    exported to disk.
+
+    Parameters
+    ----------
+    de_data : pandas.DataFrame
+        The differential expression results dataframe (e.g., from DESeq2).
+    filename_prefix : str
+        Prefix for the output CSV filename.
+    lfc_threshold : float, default 0.5
+        The minimum absolute log2FoldChange required for significance.
+    p_threshold : float, default 0.05
+        The maximum adjusted p-value (padj) allowed for significance.
+    top : int, optional
+        If provided, limits the export to the top `top` most significant genes.
+        If None, all genes passing the thresholds are exported.
+
+    Examples
+    --------
+    >>> significant_genes_to_csv(
+    ...     de_data=deseq_results,
+    ...     filename_prefix="Microglia_LPS",
+    ...     lfc_threshold=1.0,
+    ...     p_threshold=0.01,
+    ...     top=50
+    ... )
+    """
+    max_stat = np.inf
+    max_sign = np.inf
+    thr_sign = -np.log10(p_threshold)
+    df = de_data.copy()
+    df["abs_stat"] = np.abs(df["stat"])
+    non_zero_min = df["padj"][df["padj"] != 0].min()
+    df["pval"] = -np.log10(df["padj"].clip(lower=non_zero_min, upper=1))
+    msk_stat = np.abs(df["log2FoldChange"]) < np.abs(max_stat)
+    msk_sign = df["pval"] < np.abs(max_sign)
+    df = df.loc[msk_stat & msk_sign]
+    thr_msk = (np.abs(df["log2FoldChange"]) >= lfc_threshold) & (df["pval"] >= thr_sign)
+    signs = df[thr_msk].sort_values("abs_stat", ascending=False)
+    if top:
+        signs = signs.iloc[:top]
+        signs.to_csv(f"{filename_prefix}_top{top}_DEG.csv")
+    else:
+        signs.to_csv(f"{filename_prefix}_all_significant_DEG.csv")
+
+
+def export_from_anndata_to_csv(
+        adata,
+        attributes: list[str],
+        filename: str
+):
+    """
+    Exports selected cell metadata from an AnnData object to a CSV file.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        The AnnData object containing the data.
+    attributes : list[str]
+        List of column names from `adata.obs` to export.
+    filename : str
+        The path and name of the output CSV file.
+
+    Examples
+    --------
+    >>> export_from_anndata_to_csv(
+    ...     adata=my_adata,
+    ...     attributes=["celltype", "sample"],
+    ...     filename="cell_metadata.csv"
+    ... )
+    """
+    df_to_save = adata.obs[attributes].copy()
+    df_to_save.reset_index(inplace=True)
+    df_to_save.rename(columns={df_to_save.columns[0]: 'cell_id'}, inplace=True)
+    df_to_save.to_csv(filename, index=False)
+    print(f"Export completed: {filename}")
+
+
+def _read_custom_mappings(excel_file, sheet_name):
+    xls_data = pd.read_excel(excel_file, sheet_name=sheet_name)
+    mappings = {
+        col: xls_data[col].dropna().tolist()
+        for col in xls_data.columns
+    }
+    return mappings
