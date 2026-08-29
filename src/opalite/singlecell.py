@@ -161,13 +161,14 @@ def calculate_pseudobulk_deg(
         adata,
         control_name: str,
         treatment_names: list,
-        filter_celltype=None,
-        design_factors="condition",
-        gene_names="gene_symbols",
-        min_cells=10,
-        min_counts=1000,
+        filter_celltype: str = None,
+        design_factors: str ="condition",
+        gene_names: str = "gene_symbols",
+        min_cells: int = 10,
+        min_counts: int = 1000,
         write_output_file=True,
-        n_cpus=None
+        n_cpus: int = None,
+        quiet: bool = True
 ) -> dict:
     """
     Performs pseudobulk differential expression analysis using PyDESeq2.
@@ -198,6 +199,8 @@ def calculate_pseudobulk_deg(
         If True, saves differential expression results as CSV files.
     n_cpus : int, optional
         Number of CPU threads to use for PyDESeq2 computations.
+    quiet : bool, default True
+        Suppress status updates during run.
 
     Returns
     -------
@@ -234,14 +237,18 @@ def calculate_pseudobulk_deg(
         design_factors=design_factors,
         refit_cooks=True,
         n_cpus=n_cpus,
-        quiet=True
+        quiet=quiet
     )
     dds.deseq2()
 
     stats_dict = {}
 
     for tn in treatment_names:
-        res = DeseqStats(dds, contrast=[design_factors, tn, control_name])
+        res = DeseqStats(
+            dds,
+            contrast=[design_factors, tn, control_name],
+            quiet=quiet
+        )
         res.summary()
         stats_dict[tn] = res.results_df
         if write_output_file:
