@@ -162,11 +162,11 @@ def calculate_pseudobulk_deg(
         control_name: str,
         treatment_names: list,
         filter_celltype: str = None,
-        design_factors: str ="condition",
+        design_factors: str = "condition",
         gene_names: str = "gene_symbols",
         min_cells: int = 10,
         min_counts: int = 1000,
-        write_output_file=True,
+        write_output_file=False,
         n_cpus: int = None,
         quiet: bool = True
 ) -> dict:
@@ -195,7 +195,7 @@ def calculate_pseudobulk_deg(
         Minimum number of cells required per pseudobulk sample.
     min_counts : int, default 1000
         Minimum total counts required per pseudobulk sample.
-    write_output_file : bool, default True
+    write_output_file : bool, default False
         If True, saves differential expression results as CSV files.
     n_cpus : int, optional
         Number of CPU threads to use for PyDESeq2 computations.
@@ -205,7 +205,8 @@ def calculate_pseudobulk_deg(
     Returns
     -------
     dict of {str: pandas.DataFrame}
-        A dictionary mapping each treatment name to its corresponding DESeq2 results DataFrame.
+        A dictionary mapping each treatment name to its corresponding DESeq2
+        results DataFrame.
 
     Examples
     --------
@@ -351,15 +352,15 @@ def calculate_geneset_activities(
     return df_combined
 
 
-def significant_genes_to_csv(
+def filter_significant_genes(
         de_data,
-        filename_prefix: str,
         lfc_threshold: float = 0.5,
         p_threshold: float = 0.05,
         top=None
-):
+) -> pd.DataFrame:
     """
-    Filters differential expression results and saves the significant genes to a CSV file.
+    Filters differential expression results and returns the significant genes
+    in a Pandas DataFrame object.
 
     Filters genes based on a log2-fold change threshold and an adjusted p-value threshold.
     The resulting significant genes are sorted by their absolute test statistic and
@@ -369,8 +370,6 @@ def significant_genes_to_csv(
     ----------
     de_data : pandas.DataFrame
         The differential expression results dataframe (e.g., from DESeq2).
-    filename_prefix : str
-        Prefix for the output CSV filename.
     lfc_threshold : float, default 0.5
         The minimum absolute log2FoldChange required for significance.
     p_threshold : float, default 0.05
@@ -379,11 +378,16 @@ def significant_genes_to_csv(
         If provided, limits the export to the top `top` most significant genes.
         If None, all genes passing the thresholds are exported.
 
+    Returns
+    -------
+    pandas.DataFrame
+        A DataFrame containing the filtered significant genes (meeting the defined thresholds)
+        alongside their corresponding statistics.
+
     Examples
     --------
-    >>> significant_genes_to_csv(
+    >>> filter_significant_genes(
     ...     de_data=deseq_results,
-    ...     filename_prefix="Microglia_LPS",
     ...     lfc_threshold=1.0,
     ...     p_threshold=0.01,
     ...     top=50
@@ -403,9 +407,7 @@ def significant_genes_to_csv(
     signs = df[thr_msk].sort_values("abs_stat", ascending=False)
     if top:
         signs = signs.iloc[:top]
-        signs.to_csv(f"{filename_prefix}_top{top}_DEG.csv")
-    else:
-        signs.to_csv(f"{filename_prefix}_all_significant_DEG.csv")
+    return signs
 
 
 def export_from_anndata_to_csv(
