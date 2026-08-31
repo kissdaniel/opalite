@@ -2,7 +2,6 @@ import decoupler as dc
 import scanpy as sc
 import pandas as pd
 import numpy as np
-import scipy.sparse as sp
 from pydeseq2.dds import DeseqDataSet
 from pydeseq2.ds import DeseqStats
 
@@ -158,11 +157,11 @@ def log_transform_and_scale(adata, inplace=False):
 
 
 def calculate_pseudobulk_deg(
-        adata,
+        combined_adata,
+        celltype_names: list,
         control_name: str,
         treatment_names: list,
-        filter_celltype: str = None,
-        design_factors: str = "condition",
+        design_factor: str = "condition",
         gene_names: str = "gene_symbols",
         min_cells: int = 10,
         min_counts: int = 1000,
@@ -179,15 +178,13 @@ def calculate_pseudobulk_deg(
 
     Parameters
     ----------
-    adata : anndata.AnnData
-        The input single-cell AnnData object.
+    combined_adata : anndata.AnnData
+        The input single-cell AnnData object containing all combined samples.
     control_name : str
         The reference/control condition name for comparison.
     treatment_names : list of str
         List of treatment condition names to compare against the control.
-    filter_celltype : str, optional
-        Specific cell type in `adata.obs['celltype']` to filter for before analysis.
-    design_factors : str, default "condition"
+    design_factor : str, default "condition"
         Column name in `adata.obs` representing the experimental condition/factor.
     gene_names : str, default "gene_symbols"
         Column name in `adata.var` containing gene names to set as variable names.
@@ -218,44 +215,44 @@ def calculate_pseudobulk_deg(
     ...     design_factors="condition"
     ... )
     """
-    if filter_celltype:
-        adata = adata[adata.obs["celltype"] == filter_celltype].copy()
-    else:
-        adata = adata.copy()
+    combined_adata.var_names = combined_adata.var[gene_names].astype(str)
+    combined_adata.var_names_make_unique()
 
-    adata.var_names = adata.var[gene_names].astype(str)
-    adata.var_names_make_unique()
-
-    pbdata = dc.pp.pseudobulk(adata, sample_col="sample", groups_col=None, mode="sum")
+    pbdata = dc.pp.pseudobulk(combined_adata, sample_col="sample", groups_col="celltype")
     dc.pp.filter_samples(pbdata, min_cells=min_cells, min_counts=min_counts)
 
-    if sp.issparse(pbdata.X):
-        pbdata.X = pbdata.X.toarray()
-    pbdata.X = pbdata.X.astype(np.float64)
+    results_dict = {}
 
-    dds = DeseqDataSet(
-        adata=pbdata,
-        design_factors=design_factors,
-        refit_cooks=True,
-        n_cpus=n_cpus,
-        quiet=quiet
-    )
-    dds.deseq2()
+    for celltype in celltype_names:
+        sub_pb = pbdata[pbdata.obs["celltype"] == celltype].copy()
+        sub_pb.obs[design_factor] = pd.Categorical(
+                sub_pb.obs[design_factor],
+                categories=[control_name] + treatment_names
+                )
+        dds = DeseqDataSet(
+                adata=sub_pb,
+                design=f"~ {design_factor}",
+                n_cpus=n_cpus,
+                quiet=quiet
+                )
+        dds.deseq2()
 
-    stats_dict = {}
+        results_dict[celltype] = {}
 
-    for tn in treatment_names:
-        res = DeseqStats(
-            dds,
-            contrast=[design_factors, tn, control_name],
-            quiet=quiet
-        )
-        res.summary()
-        stats_dict[tn] = res.results_df
-        if write_output_file:
-            res.results_df.to_csv(f"{filter_celltype}_{tn}_all_DEG.csv")
+        for treatment in treatment_names:
+            res = DeseqStats(
+                dds,
+                contrast=[design_factor, treatment, control_name],
+                quiet=quiet
+                )
+            res.summary()
 
-    return stats_dict
+            res.lfc_shrink(coeff=f"condition[T.{treatment}]")
+            results_dict[celltype][treatment] = res.results_df
+            if write_output_file:
+                res.results_df.to_csv(f"{celltype}_{treatment}_all_DEG.csv")
+
+    return results_dict
 
 
 def calculate_geneset_activities(
