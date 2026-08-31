@@ -288,8 +288,6 @@ def calculate_geneset_activities(
         The decoupler method to use for enrichment ("ulm", "gsea", or "ora").
     p_threshold : float, optional
         If provided, filters out pathways/TFs with an adjusted p-value above this threshold.
-    out_filename : str, optional
-        If provided, saves the combined enrichment scores and p-values to this CSV file.
 
     Returns
     -------
@@ -304,8 +302,7 @@ def calculate_geneset_activities(
     ...     gene_set_name="hallmark",
     ...     treatment_name="LPS",
     ...     control_name="Control",
-    ...     method="ulm",
-    ...     out_filename="LPS_vs_Control_hallmark.csv"
+    ...     method="ulm"
     ... )
     """
     de_data.dropna(inplace=True)
@@ -344,8 +341,6 @@ def calculate_geneset_activities(
     df1.columns = ['score']
     df2.columns = ['padj']
     df_combined = pd.concat([df1, df2], axis=1)
-    if out_filename:
-        df_combined.to_csv(out_filename)
     return df_combined
 
 
