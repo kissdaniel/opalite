@@ -3,6 +3,7 @@ import decoupler as dc
 import scanpy as sc
 import pandas as pd
 import numpy as np
+from scipy.sparse import issparse
 from pydeseq2.dds import DeseqDataSet
 from pydeseq2.ds import DeseqStats
 
@@ -543,6 +544,250 @@ def calculate_pseudobulk_deg(
     return results_dict
 
 
+def calculate_cell_level_deg(
+        combined_adata,
+        celltype_names: list,
+        control_name: str,
+        treatment_names: list,
+        design_factor: str = "condition",
+        celltype_factor: str = "celltype",
+        sample_factor: str = "sample",
+        gene_names: str = "gene_symbols",
+        method: str = "wilcoxon",
+        layer: str = None,
+        target_sum: float = 1e4,
+        min_cells: int = 20,
+        min_pct: float = 0.1,
+        lfc_threshold: float = 0.25,
+        p_threshold: float = 0.05,
+        min_pairs_passed: int = 1,
+        write_output_file=False,
+        output_dir: str = ".",
+        return_pairwise: bool = False,
+        quiet: bool = True
+):
+    """
+    Performs cell-level differential expression analysis between pairs of samples.
+
+    This is the cell-level counterpart of `calculate_pseudobulk_deg` and takes the
+    same input object. Instead of aggregating cells, every control sample is
+    compared against every treated sample of a condition separately, one cell type
+    at a time, using the same rank-sum test that Seurat's FindMarkers applies by
+    default. The per-pair results are then summarized into how consistently each
+    gene changes in the same direction across the pairs.
+
+    Cells are not independent observations of a treatment, so the p-values of a
+    single pair only describe those two animals and are anticonservative as a
+    statement about the condition. The summary is therefore ranked by consistency
+    across pairs and by effect size, not by p-value, and is meant as a descriptive
+    layer beside the pseudobulk analysis rather than as a replacement for it. What
+    this layer adds over pseudobulk is the fraction of expressing cells, reported
+    as `delta_pct`, which captures responses that change how many cells express a
+    gene rather than how much they express it.
+
+    Parameters
+    ----------
+    combined_adata : anndata.AnnData
+        The input single-cell AnnData object containing all combined samples,
+        holding raw (unnormalized) counts in `.X` unless `layer` is given.
+    celltype_names : list of str
+        Cell types to analyze, matching the values in `adata.obs[celltype_factor]`.
+    control_name : str
+        The reference/control condition name for comparison.
+    treatment_names : list of str
+        List of treatment condition names to compare against the control.
+    design_factor : str, default "condition"
+        Column name in `adata.obs` representing the experimental condition/factor.
+    celltype_factor : str, default "celltype"
+        Column name in `adata.obs` holding the cell type assignment.
+    sample_factor : str, default "sample"
+        Column name in `adata.obs` identifying the sample.
+    gene_names : str, default "gene_symbols"
+        Column name in `adata.var` containing gene names to set as variable names.
+    method : str, default "wilcoxon"
+        Test passed to `scanpy.tl.rank_genes_groups`. The default matches the
+        Seurat FindMarkers default; "t-test" and "logreg" are also accepted.
+    layer : str, optional
+        Name of a layer already holding log-normalized values. If omitted, each
+        cell type is normalized to `target_sum` counts and log-transformed
+        internally. Note that this differs from the pseudobulk analysis, which
+        requires raw counts.
+    target_sum : float, default 1e4
+        Target count depth per cell for the internal normalization. An explicit
+        value is required so that normalizing one cell type at a time gives the
+        same result as normalizing the whole object would.
+    min_cells : int, default 20
+        Minimum number of cells a sample must contribute to a cell type for that
+        sample pair to be tested.
+    min_pct : float, default 0.1
+        A gene is only considered testable in a pair if at least this fraction of
+        cells express it in one of the two samples.
+    lfc_threshold : float, default 0.25
+        Minimum absolute log2 fold change for a gene to count as changed in a pair.
+    p_threshold : float, default 0.05
+        Maximum adjusted p-value for a gene to count as changed in a pair.
+    min_pairs_passed : int, default 1
+        Genes changed in fewer pairs than this are left out of the summary.
+    write_output_file : bool, default False
+        If True, saves the summary and per-pair tables as CSV files.
+    output_dir : str, default "."
+        Directory for the CSV files written when `write_output_file` is True.
+        Created if it does not exist.
+    return_pairwise : bool, default False
+        If True, returns the per-pair tables as a second value alongside the
+        summaries. The per-pair tables are written to disk whenever
+        `write_output_file` is True, regardless of this setting.
+    quiet : bool, default True
+        Suppress per-pair status updates during run.
+
+    Returns
+    -------
+    dict of {str: dict of {str: pandas.DataFrame}}
+        A nested dictionary mapping each cell type to its treatments, and each
+        treatment to its consistency summary. Cell types and treatments that
+        could not be tested are absent, so iterate over the returned keys rather
+        than over the input lists.
+    dict of {str: dict of {str: pandas.DataFrame}}
+        The per-pair results in the same nested shape, returned only if
+        `return_pairwise` is True.
+
+    Examples
+    --------
+    >>> summaries, pairwise = calculate_celllevel_deg(
+    ...     combined_adata=combined_adata,
+    ...     celltype_names=["Microglia", "Astrocyte"],
+    ...     control_name="Control",
+    ...     treatment_names=["LPS", "poly_ic"],
+    ...     return_pairwise=True
+    ... )
+    >>> summaries["Microglia"]["LPS"].head()
+    """
+    if gene_names not in combined_adata.var.columns:
+        raise KeyError(
+            f"Column '{gene_names}' not found in .var. Available columns: "
+            f"{list(combined_adata.var.columns)}. Note that concatenating with "
+            "merge='same' drops .var columns that are not identical across samples."
+            )
+    combined_adata.var_names = combined_adata.var[gene_names].astype(str)
+    combined_adata.var_names_make_unique()
+
+    sample_conditions = (
+        combined_adata.obs[[sample_factor, design_factor]]
+        .astype(str)
+        .drop_duplicates()
+        .set_index(sample_factor)[design_factor]
+        )
+    control_samples = sorted(sample_conditions[sample_conditions == control_name].index)
+    if not control_samples:
+        raise ValueError(
+            f"No sample is assigned to the control condition '{control_name}'."
+            )
+
+    # Every control sample is paired with every treated sample of a condition.
+    comparison_plan = {}
+    for treatment in treatment_names:
+        treated_samples = sorted(sample_conditions[sample_conditions == treatment].index)
+        if not treated_samples:
+            print(f"Skipping {treatment}: no sample assigned to this condition.")
+            continue
+        comparison_plan[treatment] = [
+            (control_sample, treatment_sample)
+            for control_sample in control_samples
+            for treatment_sample in treated_samples
+            ]
+        if len(treated_samples) == 1:
+            print(f"Warning - {treatment}: only one treated sample (n=1), so all of "
+                  "its pairs share the same animal and cannot separate the treatment "
+                  "from sample-specific effects.")
+
+    if not comparison_plan:
+        raise ValueError("None of the requested treatments has any sample.")
+
+    n_pairs_total = sum(len(pairs) for pairs in comparison_plan.values())
+    print(f"{len(control_samples)} control samples, {n_pairs_total} sample pairs over "
+          f"{len(comparison_plan)} treatments, {len(celltype_names)} cell types "
+          f"({n_pairs_total * len(celltype_names)} tests at most).")
+
+    if write_output_file:
+        os.makedirs(output_dir, exist_ok=True)
+
+    results_dict = {}
+    pairwise_dict = {}
+
+    for celltype in celltype_names:
+        celltype_mask = (combined_adata.obs[celltype_factor].astype(str) == celltype).to_numpy()
+        if celltype_mask.sum() == 0:
+            print(f"Skipping {celltype}: no cell carries this annotation.")
+            continue
+
+        celltype_adata = combined_adata[celltype_mask].copy()
+
+        # Normalizing per cell type is equivalent to normalizing the whole object
+        # because the depth target is explicit and the transform is per cell.
+        if layer is None:
+            sc.pp.normalize_total(celltype_adata, target_sum=target_sum)
+            sc.pp.log1p(celltype_adata)
+        elif layer in celltype_adata.layers:
+            celltype_adata.X = celltype_adata.layers[layer]
+        else:
+            raise KeyError(f"Layer '{layer}' not found in the input object.")
+
+        celltype_results = {}
+        celltype_pairwise = {}
+
+        for treatment, pairs in comparison_plan.items():
+            pair_frames = []
+            for control_sample, treatment_sample in pairs:
+                pair_frame = _test_sample_pair(
+                        celltype_adata=celltype_adata,
+                        control_sample=control_sample,
+                        treatment_sample=treatment_sample,
+                        sample_factor=sample_factor,
+                        method=method,
+                        min_cells=min_cells,
+                        min_pct=min_pct,
+                        lfc_threshold=lfc_threshold,
+                        p_threshold=p_threshold,
+                        label=f"{celltype} / {treatment}",
+                        quiet=quiet
+                        )
+                if pair_frame is not None:
+                    pair_frames.append(pair_frame)
+
+            if not pair_frames:
+                print(f"Skipping {celltype} / {treatment}: no testable sample pair.")
+                continue
+
+            pairwise_df = pd.concat(pair_frames, ignore_index=True)
+            summary_df = _summarize_pairwise_deg(pairwise_df, min_pairs_passed)
+
+            celltype_results[treatment] = summary_df
+            celltype_pairwise[treatment] = pairwise_df
+
+            print(f"{celltype} / {treatment}: {len(pair_frames)} / {len(pairs)} pairs "
+                  f"tested, {summary_df.shape[0]} genes changed in at least "
+                  f"{min_pairs_passed} pair(s), "
+                  f"{int((summary_df['consistency'] == 1).sum())} in all of them.")
+
+            if write_output_file:
+                summary_df.to_csv(
+                    os.path.join(output_dir, f"{celltype}_{treatment}_celllevel_summary.csv"),
+                    index=False
+                    )
+                pairwise_df.to_csv(
+                    os.path.join(output_dir, f"{celltype}_{treatment}_celllevel_pairwise.csv"),
+                    index=False
+                    )
+
+        if celltype_results:
+            results_dict[celltype] = celltype_results
+            pairwise_dict[celltype] = celltype_pairwise
+
+    if return_pairwise:
+        return results_dict, pairwise_dict
+    return results_dict
+
+
 def calculate_geneset_activities(
         de_data,
         gene_set_name: str,
@@ -746,6 +991,172 @@ def export_from_anndata_to_csv(
     df_to_save.rename(columns={df_to_save.columns[0]: 'cell_id'}, inplace=True)
     df_to_save.to_csv(filename, index=False)
     print(f"Export completed: {filename}")
+
+
+def expressed_fraction(adata, cell_mask):
+    """
+    Returns the fraction of the selected cells in which each gene is detected.
+
+    Computed directly from the matrix rather than read from the scanpy result,
+    so that the column is available regardless of the scanpy version.
+    """
+    matrix = adata[cell_mask].X
+    n_cells = int(cell_mask.sum())
+    if issparse(matrix):
+        detected = np.asarray((matrix > 0).sum(axis=0)).ravel()
+    else:
+        detected = np.asarray(np.asarray(matrix) > 0).sum(axis=0).ravel()
+    return pd.Series(detected / n_cells, index=adata.var_names)
+
+
+def _test_sample_pair(
+        celltype_adata,
+        control_sample: str,
+        treatment_sample: str,
+        sample_factor: str,
+        method: str,
+        min_cells: int,
+        min_pct: float,
+        lfc_threshold: float,
+        p_threshold: float,
+        label: str,
+        quiet: bool
+):
+    """
+    Runs one rank-sum comparison between a control and a treated sample.
+
+    Returns a table of the genes testable in this pair, with a 'passed' flag
+    marking those that met the effect size and p-value thresholds, or None if
+    either sample contributed too few cells.
+    """
+    pair_samples = celltype_adata.obs[sample_factor].astype(str).to_numpy()
+    control_mask = pair_samples == control_sample
+    treatment_mask = pair_samples == treatment_sample
+    n_control = int(control_mask.sum())
+    n_treatment = int(treatment_mask.sum())
+
+    if n_control < min_cells or n_treatment < min_cells:
+        if not quiet:
+            print(f"{label}: skipping {treatment_sample} vs {control_sample}, "
+                  f"{n_treatment} and {n_control} cells (min_cells={min_cells}).")
+        return None
+
+    pair_adata = celltype_adata[control_mask | treatment_mask].copy()
+    # Only the two samples of this pair may remain as groups; an empty category
+    # would otherwise be carried over from the full sample list.
+    pair_adata.obs[sample_factor] = pd.Categorical(
+            pair_adata.obs[sample_factor].astype(str),
+            categories=[control_sample, treatment_sample]
+            )
+
+    try:
+        sc.tl.rank_genes_groups(
+                pair_adata,
+                groupby=sample_factor,
+                groups=[treatment_sample],
+                reference=control_sample,
+                method=method
+                )
+    except Exception as error:
+        print(f"{label}: failed on {treatment_sample} vs {control_sample} - {error}")
+        return None
+
+    pair_df = sc.get.rank_genes_groups_df(pair_adata, group=treatment_sample)
+    pair_df = pair_df.rename(columns={
+        "names": "gene",
+        "logfoldchanges": "log2FoldChange",
+        "pvals": "pvalue",
+        "pvals_adj": "padj"
+        })
+
+    in_pair_samples = pair_adata.obs[sample_factor].astype(str).to_numpy()
+    pct_control = expressed_fraction(pair_adata, in_pair_samples == control_sample)
+    pct_treatment = expressed_fraction(pair_adata, in_pair_samples == treatment_sample)
+    pair_df["pct_control"] = pair_df["gene"].map(pct_control)
+    pair_df["pct_treatment"] = pair_df["gene"].map(pct_treatment)
+
+    # Genes absent from one side produce infinite fold changes that would
+    # distort the medians taken across pairs.
+    pair_df["log2FoldChange"] = pair_df["log2FoldChange"].replace(
+            [np.inf, -np.inf], np.nan
+            )
+
+    testable = (pair_df["pct_control"] >= min_pct) | (pair_df["pct_treatment"] >= min_pct)
+    pair_df = pair_df[testable].copy()
+
+    pair_df["passed"] = (
+        (pair_df["log2FoldChange"].abs() >= lfc_threshold)
+        & (pair_df["padj"] <= p_threshold)
+        )
+    pair_df["control_sample"] = control_sample
+    pair_df["treatment_sample"] = treatment_sample
+    pair_df["n_cells_control"] = n_control
+    pair_df["n_cells_treatment"] = n_treatment
+
+    if not quiet:
+        print(f"{label}: {treatment_sample} vs {control_sample}, "
+              f"{n_treatment} vs {n_control} cells, "
+              f"{int(pair_df['passed'].sum())} / {pair_df.shape[0]} genes changed.")
+
+    return pair_df[[
+        "gene", "control_sample", "treatment_sample",
+        "n_cells_control", "n_cells_treatment",
+        "log2FoldChange", "pct_control", "pct_treatment",
+        "pvalue", "padj", "passed"
+        ]]
+
+
+def _summarize_pairwise_deg(pairwise_df, min_pairs_passed: int):
+    """
+    Summarizes per-pair results into one row per gene.
+
+    Counts in how many pairs a gene changed in each direction and reports the
+    medians of the per-pair statistics. Genes are ranked by the share of pairs
+    agreeing on a direction, then by effect size, because with two animals per
+    condition the agreement between pairs carries the evidence rather than the
+    per-pair p-values.
+    """
+    scored = pairwise_df.copy()
+    scored["is_up"] = scored["passed"] & (scored["log2FoldChange"] > 0)
+    scored["is_down"] = scored["passed"] & (scored["log2FoldChange"] < 0)
+
+    summary = scored.groupby("gene", sort=False).agg(
+            n_pairs=("gene", "size"),
+            n_up=("is_up", "sum"),
+            n_down=("is_down", "sum"),
+            median_log2FC=("log2FoldChange", "median"),
+            median_pct_control=("pct_control", "median"),
+            median_pct_treatment=("pct_treatment", "median"),
+            median_padj=("padj", "median"),
+            median_n_cells_treatment=("n_cells_treatment", "median")
+            ).reset_index()
+
+    summary["n_up"] = summary["n_up"].astype(int)
+    summary["n_down"] = summary["n_down"].astype(int)
+    summary["consistency"] = (
+        summary[["n_up", "n_down"]].max(axis=1) / summary["n_pairs"]
+        )
+    summary["direction"] = np.where(
+            summary["n_up"] > summary["n_down"], "up",
+            np.where(summary["n_down"] > summary["n_up"], "down", "inconsistent")
+            )
+    summary["delta_pct"] = (
+        summary["median_pct_treatment"] - summary["median_pct_control"]
+        )
+
+    summary = summary[(summary["n_up"] + summary["n_down"]) >= min_pairs_passed].copy()
+    summary["abs_median_log2FC"] = summary["median_log2FC"].abs()
+    summary = summary.sort_values(
+            ["consistency", "abs_median_log2FC"],
+            ascending=False,
+            na_position="last"
+            )
+
+    return summary[[
+        "gene", "n_pairs", "n_up", "n_down", "consistency", "direction",
+        "median_log2FC", "median_pct_control", "median_pct_treatment", "delta_pct",
+        "median_padj", "median_n_cells_treatment"
+        ]].reset_index(drop=True)
 
 
 def _apply_filter(filter_function, adata, **kwargs):
