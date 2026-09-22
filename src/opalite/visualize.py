@@ -213,7 +213,7 @@ def umap(
         sc.pl.umap(adata, show=True)
     plt.tight_layout()
     if filename:
-        plt.savefig(f"{filename}.png")
+        plt.savefig(f"{filename}.pdf")
         plt.close()
     else:
         plt.show()
@@ -292,9 +292,11 @@ def gene_detection_dotplot(
     min_cells : int, default 20
         Groups with fewer cells are drawn faded and marked in the returned table.
     pct_threshold : float, default 10.0
-        Detection percentage at or above which a dot is outlined, marking the call
-        of the gene as present. The value is arbitrary and should be reported; a
-        cell type known not to express the gene is the better reference for it.
+        Detection percentage at or above which the gene is called present, which is
+        drawn as an outlined dot. Groups below `min_cells` are never called present,
+        so the outline and the `present` column of the returned table always agree.
+        The value is arbitrary and should be reported; a cell type known not to
+        express the gene is the better reference for it.
     max_dot_size : float, default 300
         Marker area assigned to 100% detection.
     cmap : str, default "Reds"
@@ -434,13 +436,14 @@ def gene_detection_dotplot(
             genes=genes,
             group_order=group_order,
             min_count=min_count,
+            min_cells=min_cells,
             mean_in_expressing_cells=mean_in_expressing_cells,
             pct_threshold=pct_threshold,
             max_dot_size=max_dot_size,
             cmap=cmap
             )
     if filename:
-        plt.savefig(f"{filename}.png", dpi=200, bbox_inches="tight")
+        plt.savefig(f"{filename}.pdf", dpi=200, bbox_inches="tight")
         plt.close()
     else:
         plt.show()
@@ -472,6 +475,7 @@ def _draw_detection_dotplot(
         genes: list,
         group_order: list,
         min_count: int,
+        min_cells: int,
         mean_in_expressing_cells: bool,
         pct_threshold: float,
         max_dot_size: float,
@@ -480,10 +484,12 @@ def _draw_detection_dotplot(
     """
     Renders the detection summary as a single dot plot on a new figure.
 
-    Groups that did not reach the cell count threshold are drawn faded, dots at or
-    above the detection threshold are outlined, and groups in which the gene was
-    not detected at all are drawn as crosses so that a zero stays distinguishable
-    from a missing combination.
+    Dots are outlined exactly when the `present` column of the summary is True, so
+    that the figure and the returned table make the same call. Outlining on the
+    detection percentage alone would mark groups that are too small to support the
+    call. Groups below the cell count threshold are drawn faded instead, and groups
+    in which the gene was not detected at all are drawn as crosses so that a zero
+    stays distinguishable from a missing combination.
     """
     gene_positions = {gene: index for index, gene in enumerate(genes)}
     group_positions = {group: index for index, group in enumerate(group_order)}
@@ -497,6 +503,7 @@ def _draw_detection_dotplot(
     pct = summary["pct_detected"].to_numpy()
     expression = summary["mean_expression"].to_numpy()
     reliable = summary["enough_cells"].to_numpy()
+    present = summary["present"].to_numpy()
     vmax = float(expression.max()) if expression.max() > 0 else 1.0
 
     zero = pct <= 0
@@ -516,7 +523,7 @@ def _draw_detection_dotplot(
                 vmax=vmax,
                 alpha=alpha,
                 linewidths=0.8,
-                edgecolors=np.where(pct[mask] >= pct_threshold, "black", "none")
+                edgecolors=np.where(present[mask], "black", "gray")
                 )
         if alpha == 1.0:
             dots = handle
@@ -560,5 +567,4 @@ def _draw_detection_dotplot(
             borderpad=0.8
             )
     legend.get_title().set_fontsize(9)
-    ax.set_title(f"Outlined dots reach {pct_threshold}% detection", fontsize=9, loc="left")
     plt.tight_layout()
