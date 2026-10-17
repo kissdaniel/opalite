@@ -585,6 +585,13 @@ def calculate_cell_level_deg(
     as `delta_pct`, which captures responses that change how many cells express a
     gene rather than how much they express it.
 
+    Besides the medians, the summary reports the worst case across pairs:
+    `min_log2FC` (the per-pair fold change closest to zero, or 0 when the pairs
+    disagree on the sign), `max_padj` (the largest per-pair adjusted p-value) and
+    `fdr`, a gene-level false discovery rate for a change in the same direction
+    in every pair. These use the pairs available for the gene; genes missing a
+    valid result in any planned pair are flagged by `pairs_complete`.
+
     Parameters
     ----------
     combined_adata : anndata.AnnData
@@ -759,7 +766,7 @@ def calculate_cell_level_deg(
                 continue
 
             pairwise_df = pd.concat(pair_frames, ignore_index=True)
-            summary_df = _summarize_pairwise_deg(pairwise_df, min_pairs_passed)
+            summary_df = _summarize_pairwise_deg(pairwise_df, min_pairs_passed, len(pairs))
 
             celltype_results[treatment] = summary_df
             celltype_pairwise[treatment] = pairwise_df
@@ -770,12 +777,12 @@ def calculate_cell_level_deg(
                   f"{int((summary_df['consistency'] == 1).sum())} in all of them.")
 
             if write_output_file:
-                summary_df.to_csv(
-                    os.path.join(output_dir, f"{celltype}_{treatment}_celllevel_summary.csv"),
+                summary_df.to_excel(
+                    os.path.join(output_dir, f"{celltype}_{treatment}_cell_level_summary.xlsx"),
                     index=False
                     )
-                pairwise_df.to_csv(
-                    os.path.join(output_dir, f"{celltype}_{treatment}_celllevel_pairwise.csv"),
+                pairwise_df.to_excel(
+                    os.path.join(output_dir, f"{celltype}_{treatment}_cell_level_pairwise.xlsx"),
                     index=False
                     )
 
@@ -1106,7 +1113,44 @@ def _test_sample_pair(
         ]]
 
 
-def _summarize_pairwise_deg(pairwise_df, min_pairs_passed: int):
+def _benjamini_hochberg(pvalues):
+    """
+    Benjamini-Hochberg adjusted p-values; missing values stay missing and are
+    not counted among the tests.
+    """
+    pvalues = np.asarray(pvalues, dtype=float)
+    adjusted = np.full(pvalues.shape, np.nan)
+    tested = ~np.isnan(pvalues)
+    n_tests = int(tested.sum())
+    if n_tests == 0:
+        return adjusted
+
+    order = np.argsort(pvalues[tested])
+    ranked = pvalues[tested][order] * n_tests / np.arange(1, n_tests + 1)
+    # Running minimum from the largest p-value down keeps the adjusted values monotone.
+    ranked = np.minimum.accumulate(ranked[::-1])[::-1]
+    values = np.empty(n_tests)
+    values[order] = np.minimum(ranked, 1.0)
+    adjusted[tested] = values
+    return adjusted
+
+
+def _least_log2fc(log2fc):
+    """
+    The per-pair log2 fold change closest to zero when all pairs agree on the
+    sign, otherwise 0: the effect size seen in every pair at least.
+    """
+    log2fc = log2fc.dropna()
+    if log2fc.empty:
+        return np.nan
+    if (log2fc > 0).all():
+        return log2fc.min()
+    if (log2fc < 0).all():
+        return log2fc.max()
+    return 0.0
+
+
+def _summarize_pairwise_deg(pairwise_df, min_pairs_passed: int, n_pairs_expected: int):
     """
     Summarizes per-pair results into one row per gene.
 
@@ -1115,10 +1159,21 @@ def _summarize_pairwise_deg(pairwise_df, min_pairs_passed: int):
     agreeing on a direction, then by effect size, because with two animals per
     condition the agreement between pairs carries the evidence rather than the
     per-pair p-values.
+
+    Next to the medians, the worst case across pairs is reported: `min_log2FC`
+    is the effect seen in every pair at least, `max_padj` the largest per-pair
+    adjusted p-value. `fdr` belongs to the hypothesis that the gene changes in
+    the same direction in every pair: the largest raw p-value across pairs (an
+    intersection-union test, valid although the pairs share animals), set to 1
+    when the pairs disagree on the sign, then Benjamini-Hochberg adjusted across
+    all genes of the cell type and treatment before any filtering. All three are
+    computed from the pairs available for the gene; `pairs_complete` is False
+    when fewer than `n_pairs_expected` pairs have a valid result.
     """
     scored = pairwise_df.copy()
     scored["is_up"] = scored["passed"] & (scored["log2FoldChange"] > 0)
     scored["is_down"] = scored["passed"] & (scored["log2FoldChange"] < 0)
+    scored["is_valid"] = scored[["log2FoldChange", "pvalue", "padj"]].notna().all(axis=1)
 
     summary = scored.groupby("gene", sort=False).agg(
             n_pairs=("gene", "size"),
@@ -1127,9 +1182,25 @@ def _summarize_pairwise_deg(pairwise_df, min_pairs_passed: int):
             median_log2FC=("log2FoldChange", "median"),
             median_pct_control=("pct_control", "median"),
             median_pct_treatment=("pct_treatment", "median"),
-            median_padj=("padj", "median"),
             median_n_cells_treatment=("n_cells_treatment", "median")
             ).reset_index()
+
+    # The worst-case statistics only use pairs with a complete result.
+    valid = scored[scored["is_valid"]].groupby("gene", sort=False)
+    worst_case = pd.DataFrame({
+        "n_pairs_valid": valid.size(),
+        "min_log2FC": valid["log2FoldChange"].agg(_least_log2fc),
+        "max_padj": valid["padj"].max(),
+        "max_pvalue": valid["pvalue"].max()
+        })
+    summary = summary.merge(worst_case, left_on="gene", right_index=True, how="left")
+    summary["n_pairs_valid"] = summary["n_pairs_valid"].fillna(0).astype(int)
+    summary["n_pairs_expected"] = n_pairs_expected
+    summary["pairs_complete"] = summary["n_pairs_valid"] == n_pairs_expected
+
+    # A gene whose pairs disagree on the sign cannot change in the same direction in all of them.
+    same_direction_p = summary["max_pvalue"].where(summary["min_log2FC"] != 0, 1.0)
+    summary["fdr"] = _benjamini_hochberg(same_direction_p)
 
     summary["n_up"] = summary["n_up"].astype(int)
     summary["n_down"] = summary["n_down"].astype(int)
@@ -1155,7 +1226,9 @@ def _summarize_pairwise_deg(pairwise_df, min_pairs_passed: int):
     return summary[[
         "gene", "n_pairs", "n_up", "n_down", "consistency", "direction",
         "median_log2FC", "median_pct_control", "median_pct_treatment", "delta_pct",
-        "median_padj", "median_n_cells_treatment"
+        "median_n_cells_treatment",
+        "min_log2FC", "max_padj", "max_pvalue", "fdr",
+        "n_pairs_valid", "n_pairs_expected", "pairs_complete"
         ]].reset_index(drop=True)
 
 
