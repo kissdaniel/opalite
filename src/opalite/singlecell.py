@@ -536,7 +536,7 @@ def calculate_pseudobulk_deg(
             results_dict[celltype][treatment] = res.results_df
             if write_output_file:
                 res.results_df.to_csv(
-                    os.path.join(output_dir, f"{celltype}_{treatment}_all_DEG.csv")
+                    os.path.join(output_dir, f"{celltype}_{treatment}_pseudobulk_DEG.csv")
                     )
 
     if return_pseudobulk:
